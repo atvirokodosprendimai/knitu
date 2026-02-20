@@ -116,6 +116,7 @@ func runServer(ctx context.Context, cmd *cli.Command) error {
 	r.Get("/dashboard", dashboardHandler(gormDB))
 	r.Post("/dashboard/deploy", dashboardDeployHandler(gormDB, nc))
 	r.Post("/dashboard/undeploy", dashboardUndeployHandler(gormDB, nc))
+	r.Post("/dashboard/prune-nodes", dashboardPruneNodesHandler(gormDB))
 	r.Post("/deployments", deploymentCreateHandler(gormDB, nc))
 	r.Delete("/deployments/{name}", undeployHandler(gormDB, nc))
 
