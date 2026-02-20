@@ -99,20 +99,25 @@ This feature allows for dynamic file creation inside containers.
     *   `Destination`: The absolute path where the file should be mounted inside the container (e.g., `/app/config.json`).
 
 2.  When the agent receives the deployment task, it performs these steps for each template:
-    *   Creates a temporary file on the host filesystem.
-    *   Renders the `Content` into this temporary file. Environment variables and other metadata can be made available to the template.
+    *   Creates a temporary directory on the host (e.g., `/tmp/knit-templates-12345/`).
+    *   For each template in the spec, it creates a file inside this directory.
+    *   It parses the `Content` using Go's `text/template` engine.
+    *   It executes the template, writing the rendered output to the temporary file. (Note: Currently, no data is passed to the template, but this can be extended).
     *   In the `docker create` command, it configures a bind mount from the temporary host file to the `Destination` path in the container.
 
-This provides a powerful way to inject configuration, connection strings, or any other dynamic data into a container at runtime.
+This provides a powerful way to inject configuration, connection strings, or any other dynamic data into a container at runtime. The temporary directory on the host is not automatically cleaned up to allow for inspection and debugging.
 
 ## 6. Networking
 
 Knit will use [wg-mesh](https://github.com/atvirokodosprendimai/wg-mesh) to create a secure, flat, peer-to-peer network for the entire cluster. This WireGuard-based mesh provides a robust foundation for node discovery, secure communication, and simplified network topology.
 
-*   **Initialization:** Each Knit node (both server and agents) will also be a `wg-mesh` node. On startup, the Knit agent will be responsible for ensuring the node joins the mesh. A central `wg-mesh` orchestrator (which can be co-located with the Knit Server) will manage peer discovery and configuration.
+*   **Prerequisite:** `wg-mesh` is treated as a prerequisite that must be running on all nodes. Knit does not manage the `wg-mesh` lifecycle.
 
-*   **Secure Communication:** All communication between the Knit server and agents, including NATS messaging, will be automatically routed over the encrypted WireGuard tunnels. This removes the need to expose the NATS server or other components to the public internet.
+*   **Node Discovery:** The Knit Server connects to the `wg-mesh` JSON-RPC API via its Unix socket (`/var/run/wgmesh.sock` by default).
+    *   Periodically, the server calls the `peers.list` RPC method to get a full list of all nodes in the mesh.
+    *   It then "discovers" these nodes by creating a `Node` record in its own database for each peer, using the peer's WireGuard public key as the unique `NodeID`. This keeps Knit's view of the cluster in sync with the mesh topology.
 
-*   **Node Discovery & IPAM:** Each node will have a stable, private IP address within the WireGuard network. The Knit server will use these VPN IP addresses to communicate with agents, and agents can discover each other if needed. IP address management is handled by `wg-mesh`.
+*   **Secure Communication:** The Knit Server's embedded NATS and HTTP services are configured to bind to a specific IP address (via the `--nats-addr` and `--http-addr` flags). To secure the control plane, this should be the server's WireGuard IP.
+    *   Agents are then configured with the server's WireGuard IP and NATS port (`--nats-url`) to ensure all communication (heartbeats, tasks) happens over the encrypted WireGuard tunnels.
 
-*   **Container Networking:** While the control plane (Knit server/agent traffic) operates on the WireGuard mesh, container-to-container networking can still leverage Docker's native capabilities. Deployments can be attached to standard Docker bridge networks or host networking. For cross-host container communication, applications can be exposed on their host's WireGuard IP address.
+*   **Container Networking:** While the control plane operates on the WireGuard mesh, container-to-container networking can still leverage Docker's native capabilities. For cross-host container communication, applications can be exposed on their host's WireGuard IP address. (This is a future roadmap item).

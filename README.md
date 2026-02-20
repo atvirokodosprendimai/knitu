@@ -18,30 +18,27 @@ The goal of Knit is to provide a simple, secure, and robust platform for running
 
 ## Architecture
 
-Knit follows a server-agent model where all components communicate over a secure WireGuard network.
+Knit follows a server-agent model where all components communicate over a secure WireGuard network established by `wg-mesh`.
 
 ```
-+-------------------------------------------------------------------------+
-|                              WireGuard Mesh                             |
-|                                (wg-mesh)                                |
-|                                                                         |
-|  +----------------+      +------------------+      +------------------+  |
-|  |  Knit Server   |<---->|   NATS Server    |<---->|   Knit Agent 1   |  |
-|  | (Orchestrator) |      +------------------+      |  (Node 1)        |  |
-|  +----------------+                                +------------------+  |
-|         ^                                                  |            |
-|         |                                                  v            |
-|         | API Requests                               +-----------+      |
-|         +------------------[ User ]                   |  Docker   |      |
-|                                                      +-----------+      |
-+-------------------------------------------------------------------------+
-
++-----------------------------------------------------------------------------+
+|                            WireGuard Mesh (wg-mesh)                         |
+|                                                                             |
+|  +---------------------+      +-----------------------+      +-------------+  |
+|  |    Knit Server      |<---->|  Embedded NATS Server |<---->| Knit Agent  |  |
+|  | (discovers via RPC) |      | (binds to wg-ip)      |      | (connects)  |  |
+|  +---------------------+      +-----------------------+      +-------------+  |
+|         ^                                                          |        |
+|         | API Requests                                             v        |
+|         +------------------------[ User ]                     +-----------+ |
+|                                                              |  Docker   | |
+|                                                              +-----------+ |
++-----------------------------------------------------------------------------+
 ```
 
-1.  **Knit Server:** The central control plane. It exposes a REST API (built with Chi), persists state in a SQLite database via GORM, and dispatches tasks to agents via NATS.
-2.  **Knit Agent:** A lightweight agent running on each worker node. It listens for tasks, interacts with the local Docker daemon, and reports status back to the server.
-3.  **NATS:** Acts as the message bus for all asynchronous communication.
-4.  **wg-mesh:** Establishes a secure, peer-to-peer VPN, ensuring all traffic between nodes is encrypted and authenticated.
+1.  **Knit Server:** The central control plane, run with the `knit-server start` command. It embeds its own NATS server and discovers other nodes by querying the `wg-mesh` daemon via its RPC socket.
+2.  **Knit Agent:** A lightweight agent, run with `knit-agent start`. It connects to the server's NATS instance (via its WireGuard IP) to receive tasks. It then interacts with the local Docker daemon to manage containers.
+3.  **wg-mesh (Prerequisite):** Establishes a secure, peer-to-peer VPN, giving each node a stable IP. Knit uses this mesh for all control-plane communication.
 
 ## Getting Started
 
@@ -49,8 +46,7 @@ Knit follows a server-agent model where all components communicate over a secure
 
 - Go (1.18+)
 - Docker
-- A running NATS server accessible from the server and agents.
-- WireGuard tools installed on all nodes.
+- **`wg-mesh`:** Must be installed and running on all nodes, with all nodes joined to the same mesh.
 
 ### Building from Source
 
@@ -60,21 +56,40 @@ Knit follows a server-agent model where all components communicate over a secure
     cd knitu
     ```
 
-2.  **Build the server and agent binaries:**
+2.  **Build the binaries:**
     ```sh
-    # Build the server
     go build -o knit-server ./cmd/knit-server
-
-    # Build the agent
     go build -o knit-agent ./cmd/knit-agent
     ```
 
-### Configuration
+### Configuration & Running
 
-The server and agent can be configured via environment variables or configuration files. Example configuration files will be available in the `/configs` directory.
+Knit is configured via CLI flags.
 
-- **Knit Server:** Needs to be configured with the NATS server address and database path.
-- **Knit Agent:** Needs the NATS server address and configuration for joining the `wg-mesh`.
+#### 1. Run the Server
+
+The server will automatically discover other mesh nodes. You should bind the NATS and HTTP services to the server's WireGuard IP address.
+
+Find the server's WireGuard IP using `wg-mesh status` or a similar command. Let's assume it is `10.54.0.1`.
+
+```sh
+# Run the server, binding services to its WireGuard IP
+./knit-server start \
+  --nats-addr="10.54.0.1:4222" \
+  --http-addr="10.54.0.1:8080" \
+  --wg-mesh-socket="/var/run/wgmesh.sock"
+```
+
+#### 2. Run the Agent(s)
+
+On each agent node, you must point the agent to the NATS server running on the server node's WireGuard IP.
+
+```sh
+# Run the agent, pointing it to the server's NATS address
+./knit-agent start --nats-url="nats://10.54.0.1:4222"
+```
+
+The agent will now connect to the server, send heartbeats, and be ready to receive deployment tasks.
 
 ## Roadmap
 

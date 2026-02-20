@@ -6,58 +6,59 @@ This document outlines the development phases for building the Knit container or
 
 The goal of this phase is to set up the project structure and establish the basic communication and data persistence layers.
 
-- [ ] **Project Scaffolding:**
-    - [ ] Create the standard Go project directory structure (`/cmd`, `/internal`, `/pkg`).
-    - [ ] Initialize `go.mod`.
-- [ ] **Initial Dependencies:**
-    - [ ] Add core dependencies:
+- [x] **Project Scaffolding:**
+    - [x] Create the standard Go project directory structure (`/cmd`, `/internal`, `/pkg`).
+    - [x] Initialize `go.mod`.
+- [x] **Initial Dependencies:**
+    - [x] Add core dependencies:
         - `github.com/go-chi/chi/v5` (Web framework)
         - `gorm.io/gorm` (ORM)
-        - `gorm.io/driver/sqlite` with `github.com/glebarez/sqlite` (CGO-free SQLite)
+        - `github.com/glebarez/sqlite` (CGO-free SQLite)
         - `github.com/nats-io/nats.go` (NATS client)
-        - `github.com/docker/docker` (Docker client)
-- [ ] **Application Skeletons:**
-    - [ ] Create `cmd/knit-server/main.go` with a basic Chi server setup.
-    - [ ] Create `cmd/knit-agent/main.go` with a basic application loop.
-- [ ] **Database & Models:**
-    - [ ] Define initial GORM models in `/internal/db/models.go` for `Node`, `Deployment`, and `ContainerInstance`.
-    - [ ] Implement a database initialization function for the server.
-- [ ] **Communication:**
-    - [ ] Implement a wrapper for NATS connection handling.
-    - [ ] Server: Implement logic to listen for agent heartbeats.
-    - [ ] Agent: Implement logic to send periodic heartbeats.
+        - `github.com/moby/moby` (Docker client)
+- [x] **Application Skeletons:**
+    - [x] Create `cmd/knit-server/main.go` with a basic Chi server setup.
+    - [x] Create `cmd/knit-agent/main.go` with a basic application loop.
+- [x] **Database & Models:**
+    - [x] Define initial GORM models in `/internal/db/models.go`.
+    - [x] Implement a database initialization function for the server.
+- [x] **Communication:**
+    - [x] Implement a wrapper for NATS connection handling.
+    - [x] Server: Implement logic to listen for agent heartbeats.
+    - [x] Agent: Implement logic to send periodic heartbeats.
 
 ## Phase 2: Container Deployment
 
 This phase focuses on the primary workflow: deploying a container based on a user's request.
 
-- [ ] **API Endpoint:**
-    - [ ] Create a `POST /deployments` endpoint in the Chi router.
-    - [ ] Define the JSON structure for a deployment request.
-- [ ] **Server Logic:**
-    - [ ] Implement the handler to validate and store the deployment request in the database.
-    - [ ] Logic to publish a "deploy task" to a NATS subject.
-- [ ] **Agent Logic:**
-    - [ ] Agent subscribes to the NATS "deploy task" subject.
-    - [ ] Implement a Docker client wrapper in the agent.
-    - [ ] Core logic to pull an image and create/start a Docker container based on the task details.
-    - [ ] Implement status reporting back to the server via NATS.
+- [x] **API Endpoint:**
+    - [x] Create a `POST /deployments` endpoint in the Chi router.
+    - [x] Define the JSON structure for a deployment request.
+- [x] **Server Logic:**
+    - [x] Implement the handler to validate and store the deployment request in the database.
+    - [x] Logic to publish a "deploy task" to a NATS subject.
+- [x] **Agent Logic:**
+    - [x] Agent subscribes to the NATS "deploy task" subject.
+    - [x] Implement a Docker client wrapper in the agent.
+    - [x] Core logic to pull an image and create/start a Docker container based on the task details.
+    - [x] Implement status reporting back to the server via NATS.
 - [ ] **Private Registries:**
-    - [ ] Add data model for `RegistryCredentials`.
+    - [x] Add data model for `RegistryCredentials`.
     - [ ] Implement API endpoints to manage credentials (securely).
-    - [ ] Enhance agent logic to use credentials when pulling images.
+    - [x] Enhance agent logic to use credentials when pulling images.
 
 ## Phase 3: Networking with WireGuard Mesh
 
 This phase implements the flat, secure networking model using `wg-mesh`.
 
-- [ ] **wg-mesh Integration:**
+- [x] **wg-mesh Integration:**
     - [ ] Add `wg-mesh` as a dependency or submodule.
-    - [ ] Develop logic for the Knit Server to act as the `wg-mesh` orchestrator or integrate with an external one.
+    - [x] Develop logic for the Knit Server to discover nodes via the `wg-mesh` JSON-RPC socket.
 - [ ] **Agent Integration:**
-    - [ ] Implement logic within the Knit Agent to join the WireGuard mesh on startup. This includes generating keys and fetching configuration.
-- [ ] **Secure Communication:**
-    - [ ] Configure NATS client and server communication to use the WireGuard interface and IP addresses.
+    - [ ] Implement logic within the Knit Agent to join the WireGuard mesh on startup. (Handled by `wg-mesh` itself).
+    - [x] Agent can be configured with the server's WireGuard IP to connect.
+- [x] **Secure Communication:**
+    - [x] Configure NATS client and server communication to use the WireGuard interface and IP addresses via flags.
 - [ ] **Container Network Exposure:**
     - [ ] Update the deployment specification to allow services running in containers to be exposed on the host's WireGuard IP address.
 
@@ -65,13 +66,13 @@ This phase implements the flat, secure networking model using `wg-mesh`.
 
 This phase adds the Nomad-inspired feature of rendering configuration files from templates and mounting them into containers.
 
-- [ ] **API & Data Model:**
-    - [ ] Extend the `Deployment` model and API to accept a `templates` array, with fields for `content` and `destination`.
-- [ ] **Agent-side Rendering:**
-    - [ ] Implement a templating engine in the agent using Go's `text/template`.
-    - [ ] Before creating a container, the agent renders the template content to a temporary file on the host.
-- [ ] **Volume Mounting:**
-    - [ ] The agent will configure a bind mount in the Docker create command to mount the temporary host file to the specified destination path inside the container.
+- [x] **API & Data Model:**
+    - [x] Extend the `Deployment` model and API to accept a `templates` array.
+- [x] **Agent-side Rendering:**
+    - [x] Implement a templating engine in the agent using Go's `text/template`.
+    - [x] Before creating a container, the agent renders the template content to a temporary file on the host.
+- [x] **Volume Mounting:**
+    - [x] The agent configures a bind mount in the Docker create command to mount the temporary host file to the specified destination path inside the container.
 
 ## Phase 5: Dashboard & Usability
 

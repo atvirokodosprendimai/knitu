@@ -5,13 +5,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/atvirokodosprendimai/knitu/internal/db"
 	"github.com/atvirokodosprendimai/knitu/internal/messaging"
+	"github.com/atvirokodosprendimai/knitu/internal/server/discovery"
 	"github.com/atvirokodosprendimai/knitu/internal/spec"
+	"github.com/atvirokodosprendimai/knitu/internal/wgmesh"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/nats-io/nats-server/v2/server"
@@ -30,9 +34,11 @@ func main() {
 				Name:  "start",
 				Usage: "Start the Knit server and embedded NATS",
 				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "http-addr", Value: ":8080", Usage: "HTTP server address"},
+					&cli.StringFlag{Name: "http-addr", Value: "0.0.0.0:8080", Usage: "HTTP server bind address"},
 					&cli.StringFlag{Name: "db-path", Value: "knit.db", Usage: "Path to the SQLite database file"},
-					&cli.IntFlag{Name: "nats-port", Value: 4222, Usage: "Port for the embedded NATS server"},
+					&cli.StringFlag{Name: "nats-addr", Value: "0.0.0.0:4222", Usage: "NATS server bind address (host:port)"},
+					&cli.StringFlag{Name: "wg-mesh-socket", Value: "/var/run/wgmesh.sock", Usage: "Path to the wg-mesh Unix socket"},
+					&cli.DurationFlag{Name: "discovery-interval", Value: 30 * time.Second, Usage: "Interval for syncing nodes from wg-mesh"},
 				},
 				Action: runServer,
 			},
@@ -47,9 +53,29 @@ func main() {
 func runServer(ctx context.Context, cmd *cli.Command) error {
 	log.Println("Starting Knit Server...")
 
-	// 1. Start Embedded NATS Server
-	natsPort := cmd.Value("nats-port").(int)
-	ns, err := server.NewServer(&server.Options{Port: natsPort})
+	// 1. Initialize Database
+	dbPath := cmd.Value("db-path").(string)
+	gormDB, err := db.NewDatabase(dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to initialize database: %w", err)
+	}
+
+	// 2. Start wg-mesh Discovery Service
+	wgSocket := cmd.Value("wg-mesh-socket").(string)
+	wgClient := wgmesh.NewClient(wgSocket)
+	discoveryInterval := cmd.Value("discovery-interval").(time.Duration)
+	discoverySvc := discovery.NewService(gormDB, wgClient, discoveryInterval)
+	discoverySvc.Start()
+	defer discoverySvc.Stop()
+
+	// 3. Start Embedded NATS Server
+	natsAddr := cmd.Value("nats-addr").(string)
+	natsHost, natsPort, err := net.SplitHostPort(natsAddr)
+	if err != nil {
+		return fmt.Errorf("invalid nats-addr format: %w", err)
+	}
+	natsPortInt, _ := strconv.Atoi(natsPort)
+	ns, err := server.NewServer(&server.Options{Host: natsHost, Port: natsPortInt})
 	if err != nil {
 		return fmt.Errorf("could not start embedded NATS server: %w", err)
 	}
@@ -57,24 +83,17 @@ func runServer(ctx context.Context, cmd *cli.Command) error {
 	if !ns.ReadyForConnections(4 * time.Second) {
 		return fmt.Errorf("embedded NATS server did not become ready")
 	}
-	log.Printf("Embedded NATS server started on port %d", natsPort)
+	log.Printf("Embedded NATS server started on %s", natsAddr)
 	natsURL := ns.ClientURL()
 
-	// 2. Initialize Database
-	dbPath := cmd.Value("db-path").(string)
-	gormDB, err := db.NewDatabase(dbPath)
-	if err != nil {
-		return fmt.Errorf("failed to initialize database: %w", err)
-	}
-
-	// 3. Connect to our own embedded NATS
+	// 4. Connect to our own embedded NATS
 	nc, err := messaging.Connect(natsURL)
 	if err != nil {
 		return fmt.Errorf("failed to connect to NATS: %w", err)
 	}
 	defer nc.Close()
 
-	// 4. Subscribe to Subjects
+	// 5. Subscribe to Subjects
 	_, err = nc.Subscribe(messaging.SubjectAgentHeartbeat, heartbeatHandler(gormDB))
 	if err != nil {
 		return fmt.Errorf("failed to subscribe to heartbeats: %w", err)
@@ -85,7 +104,7 @@ func runServer(ctx context.Context, cmd *cli.Command) error {
 	}
 	log.Println("Subscribed to agent heartbeats and task statuses.")
 
-	// 5. Start Chi HTTP Server
+	// 6. Start Chi HTTP Server
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
@@ -100,6 +119,7 @@ func runServer(ctx context.Context, cmd *cli.Command) error {
 	return http.ListenAndServe(httpAddr, r)
 }
 
+// ... handlers remain the same
 func deploymentCreateHandler(gormDB *gorm.DB, nc *nats.Conn) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var spec spec.DeploymentSpec
@@ -108,9 +128,21 @@ func deploymentCreateHandler(gormDB *gorm.DB, nc *nats.Conn) http.HandlerFunc {
 			return
 		}
 
+		// Marshal templates into JSON blob for storage
+		var templatesJSON string
+		if len(spec.Templates) > 0 {
+			templatesBytes, err := json.Marshal(spec.Templates)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("Failed to marshal templates: %v", err), http.StatusInternalServerError)
+				return
+			}
+			templatesJSON = string(templatesBytes)
+		}
+
 		deployment := db.Deployment{
-			Name:  spec.Name,
-			Image: spec.Image,
+			Name:      spec.Name,
+			Image:     spec.Image,
+			Templates: templatesJSON,
 		}
 
 		if err := gormDB.Create(&deployment).Error; err != nil {
@@ -150,7 +182,6 @@ func taskStatusHandler(gormDB *gorm.DB) nats.MsgHandler {
 
 		log.Printf("[INFO] Received task status: DeploymentID=%d, Success=%v from NodeID=%s", status.DeploymentID, status.Success, status.NodeID)
 
-		// Find the internal Node PK from the agent's string ID
 		var node db.Node
 		if err := gormDB.First(&node, "node_id = ?", status.NodeID).Error; err != nil {
 			log.Printf("[ERROR] Could not find node with NodeID %s: %v", status.NodeID, err)
@@ -159,7 +190,7 @@ func taskStatusHandler(gormDB *gorm.DB) nats.MsgHandler {
 
 		instance := db.ContainerInstance{
 			DeploymentID: status.DeploymentID,
-			NodeID:       node.ID, // Use the uint PK of the found node
+			NodeID:       node.ID,
 			ContainerID:  status.ContainerID,
 			Status:       "failed",
 		}
@@ -190,7 +221,6 @@ func heartbeatHandler(gormDB *gorm.DB) nats.MsgHandler {
 			Status:        "healthy",
 		}
 
-		// Upsert the node record based on the unique NodeID
 		result := gormDB.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "node_id"}},
 			DoUpdates: clause.AssignmentColumns([]string{"hostname", "last_heartbeat", "status"}),

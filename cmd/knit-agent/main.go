@@ -27,7 +27,7 @@ func main() {
 					&cli.StringFlag{
 						Name:  "nats-url",
 						Value: nats.DefaultURL,
-						Usage: "URL of the NATS server to connect to",
+						Usage: "URL of the NATS server to connect to (e.g., nats://10.0.0.1:4222)",
 					},
 				},
 				Action: runAgent,
@@ -51,51 +51,56 @@ func runAgent(ctx context.Context, cmd *cli.Command) error {
 
 	log.Printf("Agent initialized with Node ID: %s on Host: %s", nodeID, hostname)
 
-	// Connect to NATS
+	// 1. Connect to NATS via the provided URL
 	natsURL := cmd.Value("nats-url").(string)
+	log.Printf("Attempting to connect to NATS at %s...", natsURL)
 	nc, err := messaging.Connect(natsURL)
 	if err != nil {
 		return err
 	}
 	defer nc.Close()
 
-	// Create Docker Client
+	// 2. Create Docker Client
 	dockerClient, err := docker.NewClient()
 	if err != nil {
 		return err
 	}
 
-	// Subscribe to deployment tasks
+	// 3. Subscribe to deployment tasks
 	_, err = nc.Subscribe(messaging.SubjectTaskDeployBroadcast, deploymentTaskHandler(ctx, nodeID, dockerClient, nc))
 	if err != nil {
 		return fmt.Errorf("could not subscribe to deployment tasks: %w", err)
 	}
 	log.Println("Subscribed to deployment tasks.")
 
-	// Start heartbeat ticker
+	// 4. Start heartbeat ticker
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
-			hb := messaging.Heartbeat{
-				NodeID:    nodeID,
-				Hostname:  hostname,
-				Timestamp: time.Now(),
-			}
-			hbBytes, err := json.Marshal(hb)
-			if err != nil {
-				log.Printf("[ERROR] Marshalling heartbeat: %v", err)
-				continue
-			}
-			if err := nc.Publish(messaging.SubjectAgentHeartbeat, hbBytes); err != nil {
-				log.Printf("[ERROR] Publishing heartbeat: %v", err)
-			}
+			publishHeartbeat(nc, nodeID, hostname)
 		case <-ctx.Done():
 			log.Println("Shutting down agent...")
 			return nil
 		}
+	}
+}
+
+func publishHeartbeat(nc *nats.Conn, nodeID, hostname string) {
+	hb := messaging.Heartbeat{
+		NodeID:    nodeID,
+		Hostname:  hostname,
+		Timestamp: time.Now(),
+	}
+	hbBytes, err := json.Marshal(hb)
+	if err != nil {
+		log.Printf("[ERROR] Marshalling heartbeat: %v", err)
+		return
+	}
+	if err := nc.Publish(messaging.SubjectAgentHeartbeat, hbBytes); err != nil {
+		log.Printf("[ERROR] Publishing heartbeat: %v", err)
 	}
 }
 
