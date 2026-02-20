@@ -121,3 +121,32 @@ Knit will use [wg-mesh](https://github.com/atvirokodosprendimai/wg-mesh) to crea
     *   Agents are then configured with the server's WireGuard IP and NATS port (`--nats-url`) to ensure all communication (heartbeats, tasks) happens over the encrypted WireGuard tunnels.
 
 *   **Container Networking:** While the control plane operates on the WireGuard mesh, container-to-container networking can still leverage Docker's native capabilities. For cross-host container communication, applications can be exposed on their host's WireGuard IP address. (This is a future roadmap item).
+
+## 7. Dashboard (DataStar-Style Reactive UI)
+
+Knit provides a basic web dashboard at `/dashboard` served by the server process.
+
+### 7.1 MVP Implemented
+
+*   **Route:** `GET /dashboard`
+*   **Actions:**
+    *   `POST /dashboard/deploy` - form-based deployment submit.
+    *   `POST /dashboard/undeploy` - form-based undeploy submit.
+*   **Views:**
+    *   Nodes table (node id, hostname, labels, heartbeat)
+    *   Deployments table
+    *   Container instances table
+*   **Refresh model:** periodic auto-refresh (5s) for near-real-time visibility.
+
+### 7.2 DataStar Integration Plan
+
+To move from periodic refresh to truly reactive behavior with `data-star.dev`:
+
+1.  Add server-sent events endpoint (e.g. `/dashboard/events`) that emits deployment/node/status deltas.
+2.  Use DataStar signals/stores to bind widget state (nodes, deployments, task feed).
+3.  Replace full-page reload with targeted component updates from event stream.
+4.  Keep backend server-driven templates for initial render and SEO-friendly fallback.
+
+### 7.3 Undeploy Semantics
+
+Undeploy is implemented as a broadcast task (`knit.tasks.undeploy.broadcast`) so each agent attempts to remove matching container by deployment name. This is idempotent (no-op if missing).

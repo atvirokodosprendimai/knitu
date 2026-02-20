@@ -1,115 +1,118 @@
 # Knit API Documentation
 
-This document provides details on the RESTful API for the Knit orchestrator.
+Base URL: `http://<knit-server-ip>:8080`
 
-**Base URL:** `http://<knit-server-ip>:8080`
-
-## Authentication
-
-Authentication is not yet implemented. All endpoints are currently open.
-
----
+Authentication is not implemented yet.
 
 ## Endpoints
 
-### Health Check
+### `GET /dashboard`
+Basic GUI dashboard (deploy, undeploy, node/deployment/instance views).
 
-#### `GET /ping`
+### `GET /ping`
+Health check.
 
-Checks if the Knit server is running and responsive.
-
-**Request:**
-*   None
-
-**Response (200 OK):**
-*   **Content-Type:** `application/json`
+Response:
 ```json
 {
   "message": "pong"
 }
 ```
 
----
+### `POST /deployments`
+Create a deployment and enqueue a task for an agent.
 
-### Deployments
+Request body fields:
 
-#### `POST /deployments`
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `name` | string | yes | deployment name |
+| `image` | string | yes | container image |
+| `registry` | object | no | private registry auth |
+| `templates` | array | no | files rendered with Go `text/template` |
+| `ports` | array | no | host/container port mappings |
+| `node_selector` | object | no | schedule on node matching labels |
+| `env` | object | no | reserved, not fully wired yet |
+| `network` | string | no | reserved, not fully wired yet |
 
-Creates a new deployment. The server accepts the deployment specification, saves it, and publishes a task for an agent to execute. The API returns immediately with a `202 Accepted` status if the task is successfully dispatched.
+Registry object:
 
-**Request Body:**
-*   **Content-Type:** `application/json`
+| Field | Type | Required |
+|---|---|---|
+| `username` | string | yes |
+| `password` | string | yes |
 
-| Field       | Type     | Description                                                                                             | Required |
-|-------------|----------|---------------------------------------------------------------------------------------------------------|----------|
-| `name`      | `string` | A unique name for the deployment.                                                                       | Yes      |
-| `image`     | `string` | The Docker image to pull (e.g., `nginx:latest`).                                                        | Yes      |
-| `registry`  | `object` | (Optional) Credentials for a private registry.                                                          | No       |
-| `env`       | `object` | (Optional) A map of environment variables to set in the container (e.g., `"VAR": "value"`).              | No       |
-| `ports`     | `array`  | (Optional) A list of port mappings.                                                                     | No       |
-| `templates` | `array`  | (Optional) A list of file templates to render and mount into the container.                             | No       |
-| `network`   | `string` | (Optional) The name of a pre-existing Docker network to attach the container to.                        | No       |
+Template object:
 
-**Registry Object:**
-| Field      | Type     | Description | Required |
-|------------|----------|-------------|----------|
-| `username` | `string` | Username for the private registry. | Yes |
-| `password` | `string` | Password for the private registry. | Yes |
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `destination` | string | yes | absolute path inside container |
+| `content` | string | yes | Go template text |
 
-**Port Object:**
-| Field           | Type     | Description | Required |
-|-----------------|----------|-------------|----------|
-| `host_port`     | `integer`| The port on the host machine. | Yes |
-| `container_port`| `integer`| The port inside the container. | Yes |
+Port object:
 
-**Template Object:**
-| Field           | Type     | Description | Required |
-|-----------------|----------|-------------|----------|
-| `content`       | `string` | The content of the template (Go template format). | Yes |
-| `destination`   | `string` | The absolute path to mount the file inside the container. | Yes |
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `host_ip` | string | no | bind address on host, example `10.54.0.15` |
+| `host_port` | integer | yes | host port |
+| `container_port` | integer | yes | container port |
 
+Node selector object:
 
-**Example Request with Template:**
+- map of `key: value`
+- deployment is sent to one healthy node whose labels match all pairs
+- if not provided, deployment is broadcast to all agents (first one to process wins)
+
+Example request:
 ```json
 {
-  "name": "my-config-app",
-  "image": "busybox:latest",
+  "name": "nginx-eu-api",
+  "image": "nginx:latest",
+  "node_selector": {
+    "region": "eu",
+    "role": "api"
+  },
+  "ports": [
+    {
+      "host_ip": "10.54.0.15",
+      "host_port": 8080,
+      "container_port": 80
+    }
+  ],
   "templates": [
     {
-      "destination": "/etc/config.json",
-      "content": "{\n  \"greeting\": \"Hello from Knit\",\n  \"port\": {{ .Env.PORT | default 8080 }}\n}"
-    },
-    {
-      "destination": "/etc/another_file.txt",
-      "content": "This is a static file."
+      "destination": "/usr/share/nginx/html/index.html",
+      "content": "<h1>Hello from Knit</h1><p>Rendered by agent.</p>"
     }
   ]
 }
 ```
 
-**Responses:**
+Responses:
 
-*   **202 Accepted:** The deployment task was successfully accepted and published. The response body contains the database record for the new deployment.
-    ```json
-    {
-      "ID": 1,
-      "CreatedAt": "2023-10-27T10:00:00Z",
-      "UpdatedAt": "2023-10-27T10:00:00Z",
-      "DeletedAt": null,
-      "Name": "my-config-app",
-      "Image": "busybox:latest",
-      "RegistryCredentialsID": 0,
-      "NetworkAttachments": "",
-      "Templates": "[{\"destination\":\"/etc/config.json\",\"content\":\"{\\n  \\\"greeting\\\": \\\"Hello from Knit\\\",\\n  \\\"port\\\": {{ .Env.PORT | default 8080 }}\\n}\"},{\"destination\":\"/etc/another_file.txt\",\"content\":\"This is a static file.\"}]"
-    }
-    ```
+- `202 Accepted`: deployment stored and task published.
+- `400 Bad Request`: invalid JSON or no matching node for selector.
+- `500 Internal Server Error`: persistence or publish failure.
 
-*   **400 Bad Request:** The request body is malformed or contains invalid JSON.
-    ```text
-    Invalid request body: <error details>
-    ```
+### `DELETE /deployments/{name}`
+Queue undeploy by deployment name (broadcast to agents).
 
-*   **500 Internal Server Error:** The server encountered an error while saving the deployment or publishing the task.
-    ```text
-    Failed to save deployment: <error details>
-    ```
+Responses:
+
+- `202 Accepted`: undeploy queued.
+- `400 Bad Request`: invalid/missing name.
+
+Example `202` response:
+```json
+{
+  "ID": 1,
+  "CreatedAt": "2026-02-20T12:00:00Z",
+  "UpdatedAt": "2026-02-20T12:00:00Z",
+  "DeletedAt": null,
+  "Name": "nginx-eu-api",
+  "Image": "nginx:latest",
+  "RegistryCredentialsID": 0,
+  "NetworkAttachments": "",
+  "Templates": "[{\"destination\":\"/usr/share/nginx/html/index.html\",\"content\":\"<h1>Hello from Knit</h1><p>Rendered by agent.</p>\"}]"
+}
+```

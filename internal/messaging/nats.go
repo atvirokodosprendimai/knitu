@@ -3,6 +3,7 @@ package messaging
 import (
 	"github.com/atvirokodosprendimai/knitu/internal/spec"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -15,19 +16,33 @@ const (
 	SubjectTaskDeployBroadcast = "knit.tasks.deploy.broadcast"
 	// SubjectTaskStatus is the subject for agents to report the status of a task.
 	SubjectTaskStatus = "knit.task.status"
+	// SubjectTaskUndeployBroadcast is the subject for undeploy tasks.
+	SubjectTaskUndeployBroadcast = "knit.tasks.undeploy.broadcast"
 )
 
 // Heartbeat is the message sent by an agent.
 type Heartbeat struct {
-	NodeID    string    `json:"node_id"`
-	Hostname  string    `json:"hostname"`
-	Timestamp time.Time `json:"timestamp"`
+	NodeID    string            `json:"node_id"`
+	Hostname  string            `json:"hostname"`
+	Labels    map[string]string `json:"labels,omitempty"`
+	Timestamp time.Time         `json:"timestamp"`
+}
+
+// SubjectTaskDeployNode returns the node-specific subject for deployments.
+func SubjectTaskDeployNode(nodeID string) string {
+	return "knit.tasks.deploy.node." + strings.ReplaceAll(nodeID, " ", "")
 }
 
 // DeployTask is the message sent from the server to an agent to start a deployment.
 type DeployTask struct {
 	DeploymentID uint `json:"deployment_id"`
 	spec.DeploymentSpec
+}
+
+// UndeployTask asks agents to remove a deployed container.
+type UndeployTask struct {
+	DeploymentID uint   `json:"deployment_id"`
+	Name         string `json:"name"`
 }
 
 // TaskStatus is the message sent from an agent to the server to report task status.

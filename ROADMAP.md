@@ -79,9 +79,10 @@ This phase adds the Nomad-inspired feature of rendering configuration files from
 This phase focuses on making the system observable and easier to use.
 
 - [ ] **Web Dashboard:**
-    - [ ] Create a simple web UI using Go's `html/template` package, served by the Chi server.
-    - [ ] The dashboard should list nodes, deployments, and their statuses.
-    - [ ] Provide a simple form to create new deployments.
+    - [x] Create a simple web UI using Go's `html/template` package, served by the Chi server.
+    - [x] The dashboard lists nodes, deployments, and container instance statuses.
+    - [x] Provide forms to deploy and undeploy workloads.
+    - [ ] Replace periodic refresh with SSE/DataStar reactive updates.
 - [ ] **CLI Client:**
     - [ ] Develop a separate `knit-cli` application.
     - [ ] The CLI will interact with the Knit server's REST API.

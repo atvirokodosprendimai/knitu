@@ -11,6 +11,7 @@ type Node struct {
 	gorm.Model
 	NodeID        string `gorm:"uniqueIndex"`
 	Hostname      string
+	Labels        string
 	Status        string
 	LastHeartbeat time.Time
 }

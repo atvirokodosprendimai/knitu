@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/atvirokodosprendimai/knitu/internal/agent/docker"
@@ -29,6 +31,16 @@ func main() {
 						Value: nats.DefaultURL,
 						Usage: "URL of the NATS server to connect to (e.g., nats://10.0.0.1:4222)",
 					},
+					&cli.StringFlag{
+						Name:  "node-id-file",
+						Value: "/var/lib/knit-agent/node-id",
+						Usage: "Path to persistent node id file",
+					},
+					&cli.StringFlag{
+						Name:  "labels",
+						Value: "",
+						Usage: "Node labels as comma-separated key=value pairs (e.g., region=eu,role=api)",
+					},
 				},
 				Action: runAgent,
 			},
@@ -43,13 +55,18 @@ func main() {
 func runAgent(ctx context.Context, cmd *cli.Command) error {
 	log.Println("Starting Knit Agent...")
 
-	nodeID := uuid.New().String()
+	nodeIDFile := cmd.String("node-id-file")
+	nodeID, err := loadOrCreateNodeID(nodeIDFile)
+	if err != nil {
+		return fmt.Errorf("could not load/create node id: %w", err)
+	}
 	hostname, err := os.Hostname()
 	if err != nil {
 		return err
 	}
 
 	log.Printf("Agent initialized with Node ID: %s on Host: %s", nodeID, hostname)
+	labels := parseLabels(cmd.String("labels"))
 
 	// 1. Connect to NATS via the provided URL
 	natsURL := cmd.Value("nats-url").(string)
@@ -71,6 +88,14 @@ func runAgent(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return fmt.Errorf("could not subscribe to deployment tasks: %w", err)
 	}
+	_, err = nc.Subscribe(messaging.SubjectTaskDeployNode(nodeID), deploymentTaskHandler(ctx, nodeID, dockerClient, nc))
+	if err != nil {
+		return fmt.Errorf("could not subscribe to node deployment tasks: %w", err)
+	}
+	_, err = nc.Subscribe(messaging.SubjectTaskUndeployBroadcast, undeployTaskHandler(ctx, nodeID, dockerClient, nc))
+	if err != nil {
+		return fmt.Errorf("could not subscribe to undeploy tasks: %w", err)
+	}
 	log.Println("Subscribed to deployment tasks.")
 
 	// 4. Start heartbeat ticker
@@ -80,7 +105,7 @@ func runAgent(ctx context.Context, cmd *cli.Command) error {
 	for {
 		select {
 		case <-ticker.C:
-			publishHeartbeat(nc, nodeID, hostname)
+			publishHeartbeat(nc, nodeID, hostname, labels)
 		case <-ctx.Done():
 			log.Println("Shutting down agent...")
 			return nil
@@ -88,10 +113,11 @@ func runAgent(ctx context.Context, cmd *cli.Command) error {
 	}
 }
 
-func publishHeartbeat(nc *nats.Conn, nodeID, hostname string) {
+func publishHeartbeat(nc *nats.Conn, nodeID, hostname string, labels map[string]string) {
 	hb := messaging.Heartbeat{
 		NodeID:    nodeID,
 		Hostname:  hostname,
+		Labels:    labels,
 		Timestamp: time.Now(),
 	}
 	hbBytes, err := json.Marshal(hb)
@@ -102,6 +128,44 @@ func publishHeartbeat(nc *nats.Conn, nodeID, hostname string) {
 	if err := nc.Publish(messaging.SubjectAgentHeartbeat, hbBytes); err != nil {
 		log.Printf("[ERROR] Publishing heartbeat: %v", err)
 	}
+}
+
+func parseLabels(raw string) map[string]string {
+	labels := map[string]string{}
+	if strings.TrimSpace(raw) == "" {
+		return labels
+	}
+	for _, kv := range strings.Split(raw, ",") {
+		parts := strings.SplitN(strings.TrimSpace(kv), "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		k := strings.TrimSpace(parts[0])
+		v := strings.TrimSpace(parts[1])
+		if k == "" {
+			continue
+		}
+		labels[k] = v
+	}
+	return labels
+}
+
+func loadOrCreateNodeID(path string) (string, error) {
+	if b, err := os.ReadFile(path); err == nil {
+		id := strings.TrimSpace(string(b))
+		if id != "" {
+			return id, nil
+		}
+	}
+
+	id := uuid.New().String()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, []byte(id+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 func deploymentTaskHandler(ctx context.Context, nodeID string, dc *docker.Client, nc *nats.Conn) nats.MsgHandler {
@@ -139,6 +203,40 @@ func deploymentTaskHandler(ctx context.Context, nodeID string, dc *docker.Client
 
 		if err := nc.Publish(messaging.SubjectTaskStatus, statusBytes); err != nil {
 			log.Printf("[ERROR] Publishing task status: %v", err)
+		}
+	}
+}
+
+func undeployTaskHandler(ctx context.Context, nodeID string, dc *docker.Client, nc *nats.Conn) nats.MsgHandler {
+	return func(m *nats.Msg) {
+		var task messaging.UndeployTask
+		if err := json.Unmarshal(m.Data, &task); err != nil {
+			log.Printf("[ERROR] Unmarshalling undeploy task: %v", err)
+			return
+		}
+
+		status := messaging.TaskStatus{
+			TaskType:     "undeploy",
+			DeploymentID: task.DeploymentID,
+			NodeID:       nodeID,
+			Success:      false,
+		}
+
+		if err := dc.UndeployContainer(ctx, task.Name); err != nil {
+			status.Message = err.Error()
+			log.Printf("[ERROR] Failed to undeploy '%s': %v", task.Name, err)
+		} else {
+			status.Success = true
+			log.Printf("[INFO] Undeployed '%s'", task.Name)
+		}
+
+		b, err := json.Marshal(status)
+		if err != nil {
+			log.Printf("[ERROR] Marshalling undeploy status: %v", err)
+			return
+		}
+		if err := nc.Publish(messaging.SubjectTaskStatus, b); err != nil {
+			log.Printf("[ERROR] Publishing undeploy status: %v", err)
 		}
 	}
 }

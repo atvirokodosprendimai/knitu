@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/atvirokodosprendimai/knitu/internal/db"
@@ -112,7 +113,11 @@ func runServer(ctx context.Context, cmd *cli.Command) error {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"message": "pong"})
 	})
+	r.Get("/dashboard", dashboardHandler(gormDB))
+	r.Post("/dashboard/deploy", dashboardDeployHandler(gormDB, nc))
+	r.Post("/dashboard/undeploy", dashboardUndeployHandler(gormDB, nc))
 	r.Post("/deployments", deploymentCreateHandler(gormDB, nc))
+	r.Delete("/deployments/{name}", undeployHandler(gormDB, nc))
 
 	httpAddr := cmd.Value("http-addr").(string)
 	log.Printf("HTTP server listening on %s", httpAddr)
@@ -139,30 +144,13 @@ func deploymentCreateHandler(gormDB *gorm.DB, nc *nats.Conn) http.HandlerFunc {
 			templatesJSON = string(templatesBytes)
 		}
 
-		deployment := db.Deployment{
-			Name:      spec.Name,
-			Image:     spec.Image,
-			Templates: templatesJSON,
-		}
-
-		if err := gormDB.Create(&deployment).Error; err != nil {
-			http.Error(w, fmt.Sprintf("Failed to save deployment: %v", err), http.StatusInternalServerError)
-			return
-		}
-
-		task := messaging.DeployTask{
-			DeploymentID:   deployment.ID,
-			DeploymentSpec: spec,
-		}
-
-		taskBytes, err := json.Marshal(task)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to create task: %v", err), http.StatusInternalServerError)
-			return
-		}
-
-		if err := nc.Publish(messaging.SubjectTaskDeployBroadcast, taskBytes); err != nil {
-			http.Error(w, fmt.Sprintf("Failed to publish task: %v", err), http.StatusInternalServerError)
+		deployment, derr := upsertAndPublishDeployment(gormDB, nc, spec, templatesJSON)
+		if derr != nil {
+			status := http.StatusInternalServerError
+			if strings.Contains(derr.Error(), "no healthy node matches selector") {
+				status = http.StatusBadRequest
+			}
+			http.Error(w, derr.Error(), status)
 			return
 		}
 
@@ -181,6 +169,15 @@ func taskStatusHandler(gormDB *gorm.DB) nats.MsgHandler {
 		}
 
 		log.Printf("[INFO] Received task status: DeploymentID=%d, Success=%v from NodeID=%s", status.DeploymentID, status.Success, status.NodeID)
+		if status.TaskType == "undeploy" {
+			log.Printf("[INFO] Undeploy status deployment=%d node=%s success=%v", status.DeploymentID, status.NodeID, status.Success)
+			if status.Success {
+				if err := gormDB.Where("deployment_id = ?", status.DeploymentID).Delete(&db.ContainerInstance{}).Error; err != nil {
+					log.Printf("[WARN] Failed to clear container instances for undeploy: %v", err)
+				}
+			}
+			return
+		}
 
 		var node db.Node
 		if err := gormDB.First(&node, "node_id = ?", status.NodeID).Error; err != nil {
@@ -212,22 +209,59 @@ func heartbeatHandler(gormDB *gorm.DB) nats.MsgHandler {
 			return
 		}
 
-		log.Printf("[INFO] Heartbeat received: NodeID=%s, Hostname=%s", hb.NodeID, hb.Hostname)
+		labelsJSON, err := json.Marshal(hb.Labels)
+		if err != nil {
+			log.Printf("[WARN] Could not marshal heartbeat labels: %v", err)
+		}
+
+		log.Printf("[INFO] Heartbeat received: NodeID=%s, Hostname=%s, Labels=%v", hb.NodeID, hb.Hostname, hb.Labels)
 
 		node := db.Node{
 			NodeID:        hb.NodeID,
 			Hostname:      hb.Hostname,
+			Labels:        string(labelsJSON),
 			LastHeartbeat: hb.Timestamp,
 			Status:        "healthy",
 		}
 
 		result := gormDB.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "node_id"}},
-			DoUpdates: clause.AssignmentColumns([]string{"hostname", "last_heartbeat", "status"}),
+			DoUpdates: clause.AssignmentColumns([]string{"hostname", "labels", "last_heartbeat", "status"}),
 		}).Create(&node)
 
 		if result.Error != nil {
 			log.Printf("[ERROR] Upserting node: %v", result.Error)
 		}
 	}
+}
+
+func selectNodeForDeployment(gormDB *gorm.DB, selector map[string]string) (string, error) {
+	var nodes []db.Node
+	if err := gormDB.Where("status = ?", "healthy").Order("last_heartbeat desc").Find(&nodes).Error; err != nil {
+		return "", err
+	}
+	for _, n := range nodes {
+		if matchesSelector(n.Labels, selector) {
+			return n.NodeID, nil
+		}
+	}
+	return "", fmt.Errorf("no healthy node matches selector")
+}
+
+func matchesSelector(labelsJSON string, selector map[string]string) bool {
+	if len(selector) == 0 {
+		return true
+	}
+	labels := map[string]string{}
+	if strings.TrimSpace(labelsJSON) != "" {
+		if err := json.Unmarshal([]byte(labelsJSON), &labels); err != nil {
+			return false
+		}
+	}
+	for k, v := range selector {
+		if labels[k] != v {
+			return false
+		}
+	}
+	return true
 }
