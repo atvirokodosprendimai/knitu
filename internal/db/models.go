@@ -9,7 +9,8 @@ import (
 // Node represents a worker host in the cluster.
 type Node struct {
 	gorm.Model
-	Hostname      string `gorm:"uniqueIndex"`
+	NodeID        string `gorm:"uniqueIndex"`
+	Hostname      string
 	Status        string
 	LastHeartbeat time.Time
 }
